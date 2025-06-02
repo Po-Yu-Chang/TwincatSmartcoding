@@ -1,0 +1,93 @@
+/* style.css */
+body, html {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden; /* 防止 body 出現捲軸 */
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-editor-foreground);
+    background-color: var(--vscode-editor-background);
+}
+
+.container {
+    display: flex;
+    flex-direction: column; /* 關鍵：將窗格垂直堆疊 */
+    height: 100vh;         /* 佔滿整個視窗高度 */
+    padding: 10px;
+    box-sizing: border-box;
+}
+
+.editor-pane {
+    display: flex;
+    flex-direction: column; /* 窗格內的標題和文字區域也是垂直堆疊 */
+    flex-grow: 1;           /* 允許窗格佔用可用垂直空間 */
+    flex-basis: 0;          /* 確保空間平均分配 (如果有多個 flex-grow:1 的項目) */
+    margin-bottom: 10px;    /* 窗格之間的間距 */
+    min-height: 100px;      /* 窗格的最小高度 */
+    overflow: hidden;       /* 隱藏超出窗格的內容，讓文字區域內部滾動 */
+}
+
+.editor-pane:last-child {
+    margin-bottom: 0; /* 最後一個窗格不需要底部間距 */
+}
+
+.editor-pane h3 {
+    margin-top: 0;
+    margin-bottom: 5px;
+    font-size: var(--vscode-font-size);
+    flex-shrink: 0; /* 防止標題被壓縮 */
+}
+
+.editor-area {
+    width: 100%;            /* 文字區域寬度佔滿其父窗格 */
+    flex-grow: 1;           /* 文字區域高度佔滿其父窗格的剩餘空間 */
+    border: 1px solid var(--vscode-input-border, #ccc);
+    font-family: var(--vscode-editor-font-family);
+    font-size: var(--vscode-editor-font-size);
+    line-height: var(--vscode-editor-line-height);
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    box-sizing: border-box;
+    resize: none;           /* 禁止使用者手動調整大小 */
+    min-height: 50px;       /* 文字區域的最小高度 */
+}
+
+h2 {
+    margin-top: 0;
+    font-size: var(--vscode-font-size);
+    color: var(--vscode-editor-foreground);
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--vscode-editorWidget-border, #454545);
+}
+
+textarea {
+    flex-grow: 1;
+    width: 100%;
+    border: none;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    font-family: var(--vscode-editor-font-family);
+    font-size: var(--vscode-editor-font-size);
+    padding: 5px;
+    box-sizing: border-box;
+    resize: none; /* Disable manual resizing by user */
+}
+
+textarea:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+}
+
+#save-button {
+    margin-top: 10px;
+    padding: 8px 15px;
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 2px;
+    cursor: pointer;
+    align-self: flex-start;
+}
+
+#save-button:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
