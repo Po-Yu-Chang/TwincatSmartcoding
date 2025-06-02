@@ -91,3 +91,23 @@ textarea:focus {
 #save-button:hover {
     background-color: var(--vscode-button-hoverBackground);
 }
+
+/* Splitter 水平分隔條 */
+#splitter {
+    height: 5px;
+    cursor: row-resize;
+    background: var(--vscode-editorWidget-border);
+    user-select: none;
+}
+
+/* Container & 兩區塊基本排版 */
+#container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+.declarations-view,
+.code-view {
+    flex: 1;
+    overflow: auto;
+}

@@ -1,40 +1,58 @@
-// See https://go.microsoft.com/fwlink/?LinkId=733558
-// for the documentation about the tasks.json format
+// 文件路径：<你的 项目根>/ .vscode/tasks.json
 {
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"type": "npm",
-			"script": "watch",
-			"problemMatcher": "$ts-webpack-watch",
-			"isBackground": true,
-			"presentation": {
-				"reveal": "never",
-				"group": "watchers"
-			},
-			"group": {
-				"kind": "build",
-				"isDefault": true
-			}
-		},
-		{
-			"type": "npm",
-			"script": "watch-tests",
-			"problemMatcher": "$tsc-watch",
-			"isBackground": true,
-			"presentation": {
-				"reveal": "never",
-				"group": "watchers"
-			},
-			"group": "build"
-		},
-		{
-			"label": "tasks: watch-tests",
-			"dependsOn": [
-				"npm: watch",
-				"npm: watch-tests"
-			],
-			"problemMatcher": []
-		}
-	]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "npm: watch",           // 一定要写 “npm: watch”，跟 VS Code 列出来的任务名称一模一样
+      "type": "npm",
+      "script": "watch",               // 对应到 package.json 中 "watch": "webpack --watch"
+      "isBackground": true,
+      "problemMatcher": [
+        "$tsc-watch"
+      ],            // 空数组，避免 VS Code 抱怨 “未定义 problemMatcher”
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "options": {
+        // ← 这是重中之重：一定要写这一段，强制让 VS Code 在 “项目根” 下执行 npm
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "npm: watch-tests",
+      "type": "npm",
+      "script": "watch-tests",         // 对应到 package.json 中 "watch-tests": "tsc -p . -w --outDir out"
+      "isBackground": true,
+      "problemMatcher": [
+        "$tsc-watch"                    // tsc -w 有内建 matcher，可以把 TS 错误推到 Problems 面板
+      ],
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "watch: all",
+      "dependsOn": [
+        "npm: watch",
+        "npm: watch-tests"
+      ],
+      "problemMatcher": [],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    }
+  ]
 }

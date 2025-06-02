@@ -1,49 +1,52 @@
 import * as vscode from 'vscode';
 
 interface ParsedTcDocument {
+    /** POU-level <Declaration><![CDATA[ ... ]]></Declaration> 內部純文字 */
     declarations: string;
+    /** POU-level <Implementation>…<ST><![CDATA[ ... ]]></ST>…</Implementation> 內部純文字 */
     code: string;
-    prefix: string; // Content before declarations start (e.g., PROGRAM name VAR)
-    suffix: string; // Content after code ends (e.g., END_PROGRAM)
-    declarationBlockEndMarker: string; // e.g., END_VAR or END_STRUCT; END_TYPE
+    /** 從檔頭到 POU-level <Declaration> 開始之前的所有 XML */
+    prefix: string;
+    /** 從 POU-level </Implementation> 結束之後到檔尾的所有 XML */
+    suffix: string;
+    /** （備用，代表 CDATA 結尾標記） */
+    declarationBlockEndMarker: string;
 }
 
 export class TcEditorProvider implements vscode.CustomTextEditorProvider {
-
     public static readonly viewType = 'twincat.editor';
 
-    constructor(
-        private readonly context: vscode.ExtensionContext
-    ) { }
+    constructor(private readonly context: vscode.ExtensionContext) { }
 
     public async resolveCustomTextEditor(
         document: vscode.TextDocument,
         webviewPanel: vscode.WebviewPanel,
         _token: vscode.CancellationToken
     ): Promise<void> {
-        webviewPanel.webview.options = {
-            enableScripts: true,
-        };
+        // 啟用 Webview 裡的 script
+        webviewPanel.webview.options = { enableScripts: true };
 
-        const updateWebview = () => {
-            const parsedDoc = this.parseDocument(document);
-            webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document, parsedDoc);
-        };
+        // (1) 先 parse 一次，將最上層 POU Declaration/CDAT A 和 Implementation→ST CDATA 拆出
+        let parsedDoc = this.parseDocument(document);
 
-        updateWebview(); // Initial load
+        // (2) 把 HTML 寫給 Webview，左右兩欄顯示 declarations / code
+        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document, parsedDoc);
 
-        webviewPanel.webview.onDidReceiveMessage(
-            async message => {
-                switch (message.type) {
-                    case 'contentChanged':
+        // 當 Webview postMessage 過來
+        webviewPanel.webview.onDidReceiveMessage(async message => {
+            switch (message.type) {
+                case 'contentChanged':
+                    {
+                        // 使用者按下「Save Changes」，拿到新的 declarations & code
                         const newContent = this.reconstructFileContent(
                             message.declarations,
                             message.code,
-                            message.prefix,
-                            message.suffix,
-                            message.declarationBlockEndMarker,
+                            parsedDoc.prefix,
+                            parsedDoc.suffix,
+                            parsedDoc.declarationBlockEndMarker,
                             document.fileName.toLowerCase()
                         );
+                        // 用 WorkspaceEdit 全檔取代
                         const edit = new vscode.WorkspaceEdit();
                         edit.replace(
                             document.uri,
@@ -51,24 +54,27 @@ export class TcEditorProvider implements vscode.CustomTextEditorProvider {
                             newContent
                         );
                         await vscode.workspace.applyEdit(edit);
-                        // After applying edit, the document object might be stale.
-                        // VS Code should provide the updated document in onDidChangeTextDocument.
-                        return;
-                    case 'save':
-                        await document.save();
-                        vscode.window.showInformationMessage('File saved!');
-                        return;
-                    case 'error':
-                        vscode.window.showErrorMessage(message.value);
-                        return;
-                }
-            }
-        );
+                        // applyEdit 後，會觸發 onDidChangeTextDocument，再做一次更新
+                    }
+                    return;
 
+                case 'save':
+                    // Webview 按下「Save File」，實際把檔案寫進硬碟
+                    await document.save();
+                    vscode.window.showInformationMessage('📂 File saved!');
+                    return;
+
+                case 'error':
+                    vscode.window.showErrorMessage(message.value);
+                    return;
+            }
+        });
+
+        // 監聽 document 內容修改（包含 applyEdit、外部改動）
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(e => {
             if (e.document.uri.toString() === document.uri.toString()) {
-                console.log('Document changed externally, updating webview for:', document.uri.fsPath);
-                updateWebview(); // Re-parse and update webview
+                parsedDoc = this.parseDocument(document);
+                webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document, parsedDoc);
             }
         });
 
@@ -77,9 +83,11 @@ export class TcEditorProvider implements vscode.CustomTextEditorProvider {
         });
     }
 
+    /**
+     * 解析 TextDocument，抓最上層 POU 的 Declaration CDATA 內文，以及最上層 POU 的 Implementation→ST CDATA 內文
+     */
     private parseDocument(document: vscode.TextDocument): ParsedTcDocument {
         const content = document.getText();
-        const contentUpperCase = content.toUpperCase();
         const fileNameLowerCase = document.fileName.toLowerCase();
 
         let declarations = "";
@@ -88,85 +96,49 @@ export class TcEditorProvider implements vscode.CustomTextEditorProvider {
         let suffix = "";
         let declarationBlockEndMarker = "";
 
-        if (fileNameLowerCase.endsWith('.tcpou')) {
-            declarationBlockEndMarker = "END_VAR";
-            const pouKeywords = ["PROGRAM", "FUNCTION_BLOCK", "FUNCTION"];
-            let pouTypeKeyword = "";
-            for (const kw of pouKeywords) {
-                if (contentUpperCase.startsWith(kw)) {
-                    pouTypeKeyword = kw;
-                    break;
+        if (fileNameLowerCase.endsWith('.tcpou') || fileNameLowerCase.endsWith('.xml')) {
+            // (1) 抓最上層 POU 的 Declaration CDATA 內文
+            const declRegex = /<Declaration>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/Declaration>/i;
+            const declMatch = declRegex.exec(content);
+            if (declMatch) {
+                const fullDeclMatch = declMatch[0];
+                const inner = declMatch[1];
+                declarations = inner.trim();
+                declarationBlockEndMarker = "</Declaration>";
+                const declStartIndex = declMatch.index;
+                prefix = content.substring(0, declStartIndex);
+
+                // (2) 抓最上層 POU 的 Implementation→ST CDATA 內文
+                const afterDeclPos = declStartIndex + fullDeclMatch.length;
+                const implRegex = /<Implementation>[\s\S]*?<ST>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/ST>[\s\S]*?<\/Implementation>/i;
+                const subAfterDecl = content.substring(afterDeclPos);
+                const implMatch = implRegex.exec(subAfterDecl);
+                if (implMatch) {
+                    const fullImplMatch = implMatch[0];
+                    const innerCode = implMatch[1];
+                    code = innerCode.trim();
+                    const implStartIndex = afterDeclPos + implMatch.index;
+                    const implEndIndex = implStartIndex + fullImplMatch.length;
+                    suffix = content.substring(implEndIndex);
                 }
-            }
-
-            const varRegex = new RegExp(`^(.*?${pouTypeKeyword}[^\\S\\r\\n]+.*?\\r?\\n[^\\S\\r\\n]*VAR)(.*?)(\\r?\\n[^\\S\\r\\n]*END_VAR)(.*?)(END_${pouTypeKeyword})$`, "is");
-            // is: i for case-insensitive, s for dot matches newline (though not strictly needed here with (.*?) for content)
-
-            const match = content.match(varRegex);
-
-            if (match) {
-                prefix = match[1]; // e.g., "PROGRAM Main\nVAR" (original casing)
-                declarations = match[2].trim(); // Content between VAR and END_VAR
-                // match[3] is the END_VAR block itself, including leading/trailing whitespace/newlines
-                code = match[4].trim(); // Content between END_VAR and END_POUTYPE
-                suffix = match[5]; // e.g., "END_PROGRAM" (original casing)
-            } else {
-                // Fallback: try to find at least VAR...END_VAR
-                const varStartIndex = contentUpperCase.indexOf("VAR");
-                const endVarIndex = contentUpperCase.indexOf("END_VAR");
-                if (varStartIndex !== -1 && endVarIndex > varStartIndex) {
-                    const pouDefEndIndex = varStartIndex; // Approx.
-                    prefix = content.substring(0, pouDefEndIndex);
-                    // Find the actual "VAR" keyword with original casing
-                    const actualVarKeywordMatch = content.substring(pouDefEndIndex).match(/VAR/i);
-                    if (actualVarKeywordMatch && actualVarKeywordMatch.index !== undefined) {
-                         prefix = content.substring(0, pouDefEndIndex + actualVarKeywordMatch.index + actualVarKeywordMatch[0].length);
-                    }
-
-                    declarations = content.substring(prefix.length, endVarIndex).trim();
-                    const codeStartIndex = endVarIndex + "END_VAR".length;
-                    const endPouIndex = contentUpperCase.lastIndexOf(`END_${pouTypeKeyword}`);
-                    if (endPouIndex > codeStartIndex) {
-                        code = content.substring(codeStartIndex, endPouIndex).trim();
-                        suffix = content.substring(endPouIndex);
-                    } else {
-                        code = content.substring(codeStartIndex).trim();
-                        suffix = "";
-                    }
-                } else {
-                    // Simplest fallback
-                    code = content;
-                }
-            }
-        } else if (fileNameLowerCase.endsWith('.tcdut')) {
-            declarationBlockEndMarker = "END_STRUCT;"; // Note: END_TYPE is separate or part of suffix
-            const dutRegex = /^(.*?TYPE[^\\S\\r\\n]+.*?\\r?\\n[^\\S\\r\\n]*STRUCT)(.*?)(\\r?\\n[^\\S\\r\\n]*END_STRUCT;\\s*END_TYPE.*?)$/is;
-            const match = content.match(dutRegex);
-            if (match) {
-                prefix = match[1]; // TYPE ... STRUCT
-                declarations = match[2].trim(); // Declarations
-                suffix = match[3]; // END_STRUCT; END_TYPE ...
-            } else {
-                declarations = content; // Treat all as declaration
-            }
-        } else if (fileNameLowerCase.endsWith('.tcgvl')) {
-            declarationBlockEndMarker = "END_VAR";
-            const gvlRegex = /^(.*?VAR_GLOBAL)(.*?)(\\r?\\n[^\\S\\r\\n]*END_VAR.*?)$/is;
-            const match = content.match(gvlRegex);
-            if (match) {
-                prefix = match[1]; // VAR_GLOBAL
-                declarations = match[2].trim(); // Declarations
-                suffix = match[3]; // END_VAR ...
-            } else {
-                declarations = content; // Treat all as declaration
             }
         } else {
-            code = content; // Default for unknown
+            // 非 .tcpou/.xml，則全部當 code
+            code = content;
         }
 
-        return { declarations, code, prefix, suffix, declarationBlockEndMarker };
+        return {
+            declarations,
+            code,
+            prefix,
+            suffix,
+            declarationBlockEndMarker
+        };
     }
 
+    /**
+     * 將新的 declarations / code 重新包回最上層 POU 的 XML 結構
+     */
     private reconstructFileContent(
         declarations: string,
         code: string,
@@ -175,157 +147,132 @@ export class TcEditorProvider implements vscode.CustomTextEditorProvider {
         declarationBlockEndMarker: string,
         fileNameLowerCase: string
     ): string {
-        declarations = declarations.trim(); // Ensure no leading/trailing whitespace from textarea
-        code = code.trim();
-
-        if (fileNameLowerCase.endsWith('.tcpou')) {
-            // Ensure there's a newline after prefix if it doesn't end with one,
-            // and before END_VAR if declarations are not empty.
-            // Similar for code and suffix.
-            let reconstructed = prefix.trimEnd();
-            if (declarations) {
-                reconstructed += (reconstructed.endsWith('\\n') ? '' : '\\n') + declarations.trim() + (declarations.endsWith('\\n') ? '' : '\\n') + declarationBlockEndMarker;
-            } else {
-                 reconstructed += (reconstructed.endsWith('\\n') ? '' : '\\n') + declarationBlockEndMarker;
-            }
-            if (code) {
-                reconstructed += (reconstructed.endsWith('\\n') ? '' : '\\n') + code.trim();
-            }
-            reconstructed += (reconstructed.endsWith('\\n') || !suffix.trimStart() ? '' : '\\n') + suffix.trimStart();
-            return reconstructed;
-
-        } else if (fileNameLowerCase.endsWith('.tcdut')) {
-            // TYPE ... STRUCT \n declarations \n END_STRUCT; END_TYPE
-            let reconstructed = prefix.trimEnd();
-            if (declarations) {
-                 reconstructed += (reconstructed.endsWith('\\n') ? '' : '\\n') + declarations.trim();
-            }
-            // Suffix already contains END_STRUCT; END_TYPE
-            reconstructed += (reconstructed.endsWith('\\n') || !suffix.trimStart() ? '' : '\\n') + suffix.trimStart();
-            return reconstructed;
-
-        } else if (fileNameLowerCase.endsWith('.tcgvl')) {
-            // VAR_GLOBAL \n declarations \n END_VAR
-            let reconstructed = prefix.trimEnd();
-            if (declarations) {
-                reconstructed += (reconstructed.endsWith('\\n') ? '' : '\\n') + declarations.trim();
-            }
-             // Suffix already contains END_VAR
-            reconstructed += (reconstructed.endsWith('\\n') || !suffix.trimStart() ? '' : '\\n') + suffix.trimStart();
-            return reconstructed;
+        if (fileNameLowerCase.endsWith('.tcpou') || fileNameLowerCase.endsWith('.xml')) {
+            // 把 declarations 包成 CDATA
+            const declCData =
+                `<Declaration><![CDATA[\n${declarations.trim()}\n]]></Declaration>`;
+            // 把 code 包成 Implementation→ST CDATA
+            const codeCData =
+                `<Implementation>\n` +
+                `    <ST><![CDATA[\n${code.trim()}\n]]></ST>\n` +
+                `</Implementation>`;
+            // 拼回 prefix + declCData + codeCData + suffix
+            return prefix.trimEnd() + "\n" +
+                   declCData + "\n" +
+                   codeCData + "\n" +
+                   suffix.trimStart();
         }
-        return declarations + "\\n" + code; // Fallback
+        // fallback
+        return declarations + "\n" + code;
     }
 
-    private getHtmlForWebview(webview: vscode.Webview, document: vscode.TextDocument, parsedDoc: ParsedTcDocument): string {
+    /**
+     * 產生 Webview HTML：上下有 Save 按鈕，左右分別是 Declaration / Code 兩個 textarea
+     */
+    private getHtmlForWebview(
+        webview: vscode.Webview,
+        document: vscode.TextDocument,
+        parsedDoc: ParsedTcDocument
+    ): string {
         const nonce = getNonce();
-        const { declarations, code, prefix, suffix, declarationBlockEndMarker } = parsedDoc;
-
-        const stylesPathMain = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'style.css');
-        const stylesUri = webview.asWebviewUri(stylesPathMain);
-
-        // Pass the parsed parts to the webview script
-        const webviewState = {
-            declarations: escapeHtml(declarations),
-            code: escapeHtml(code),
-            prefix: escapeHtml(prefix),
-            suffix: escapeHtml(suffix),
-            declarationBlockEndMarker: escapeHtml(declarationBlockEndMarker),
-            fileName: document.fileName.toLowerCase()
-        };
+        const { declarations, code } = parsedDoc;
 
         return `<!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
-                <link href="${stylesUri}" rel="stylesheet">
-                <title>TwinCAT Editor</title>
-            </head>
-            <body>
-                <div class="editor-container">
-                    <div class="declarations-view">
-                        <h2>Declarations</h2>
-                        <textarea id="declarations-area" rows="10">${escapeHtml(declarations)}</textarea>
-                    </div>
-                    <div class="code-view">
-                        <h2>Code</h2>
-                        <textarea id="code-area" rows="20">${escapeHtml(code)}</textarea>
-                    </div>
-                </div>
-                <button id="save-button">Save Changes</button>
+<html lang="en">
+<head>
+    <meta charsetSet-Location -LiteralPath {your_project_directory}="UTF-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+    <title>Twincat POU Editor</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; height: 100%; width: 100%;
+            display: flex; flex-direction: column;
+            font-family: Consolas, 'Courier New', monospace;
+        }
+        #toolbar {
+            background: #f2f2f2;
+            padding: 6px;
+            border-bottom: 1px solid #ccc;
+        }
+        #container {
+            flex: 1;
+            display: flex;
+            flex-direction: row;
+        }
+        .pane {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #ddd;
+        }
+        .pane:last-child {
+            border-right: none;
+        }
+        .pane h2 {
+            margin: 4px;
+            font-size: 14px;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 2px;
+        }
+        .pane textarea {
+            flex: 1;
+            width: 100%;
+            resize: none;
+            font-family: inherit;
+            font-size: 13px;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        #save-button {
+            font-size: 13px;
+            padding: 4px 8px;
+        }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <button id="save-button">💾 Save Changes</button>
+    </div>
+    <div id="container">
+        <div class="pane">
+            <h2>📝 Declarations (POU-level)</h2>
+            <textarea id="declarations-area" placeholder="No Declaration found…">${escapeHtml(declarations)}</textarea>
+        </div>
+        <div class="pane">
+            <h2>💻 Code (ST, POU-level)</h2>
+            <textarea id="code-area" placeholder="No ST Implementation found…">${escapeHtml(code)}</textarea>
+        </div>
+    </div>
 
-                <script nonce="${nonce}">
-                    const vscode = acquireVsCodeApi();
-                    const declarationsArea = document.getElementById('declarations-area');
-                    const codeArea = document.getElementById('code-area');
-                    const saveButton = document.getElementById('save-button');
+    <script nonce="${nonce}">
+        const vscode = acquireVsCodeApi();
 
-                    // Restore initial state from the extension
-                    const initialState = ${JSON.stringify(webviewState)};
-                    declarationsArea.value = unescapeHtml(initialState.declarations);
-                    codeArea.value = unescapeHtml(initialState.code);
-                    
-                    let currentPrefix = unescapeHtml(initialState.prefix);
-                    let currentSuffix = unescapeHtml(initialState.suffix);
-                    let currentDeclEndMarker = unescapeHtml(initialState.declarationBlockEndMarker);
-                    const currentFileName = initialState.fileName;
+        document.getElementById('save-button').addEventListener('click', () => {
+            vscode.postMessage({
+                type: 'contentChanged',
+                declarations: document.getElementById('declarations-area').value,
+                code: document.getElementById('code-area').value,
+            });
+        });
 
-                    function unescapeHtml(safe) {
-                        if (typeof safe !== 'string') return safe;
-                        return safe
-                            .replace(/&amp;/g, "&")
-                            .replace(/&lt;/g, "<")
-                            .replace(/&gt;/g, ">")
-                            .replace(/&quot;/g, '"')
-                            .replace(/&#039;/g, "'");
-                    }
-
-                    function sendContentChanged() {
-                        vscode.postMessage({
-                            type: 'contentChanged',
-                            declarations: declarationsArea.value,
-                            code: codeArea.value,
-                            prefix: currentPrefix, // Send back the original prefix
-                            suffix: currentSuffix, // Send back the original suffix
-                            declarationBlockEndMarker: currentDeclEndMarker // Send back the original marker
-                        });
-                    }
-
-                    declarationsArea.addEventListener('input', sendContentChanged);
-                    codeArea.addEventListener('input', sendContentChanged);
-
-                    saveButton.addEventListener('click', () => {
-                        // The contentChanged message already sends the latest state.
-                        // If we want an explicit save action to *also* send the state,
-                        // we can call sendContentChanged() here too, or rely on the extension
-                        // to use the latest TextDocument content if save is just a trigger.
-                        // For simplicity, let's ensure the latest is sent before save.
-                        sendContentChanged(); 
-                        vscode.postMessage({ type: 'save' });
-                    });
-
-                    // Handle messages from the extension (e.g., for external updates)
-                    window.addEventListener('message', event => {
-                        const message = event.data;
-                        switch (message.type) {
-                            case 'updateFromExtension': // Sent by extension on external file change
-                                declarationsArea.value = unescapeHtml(message.declarations);
-                                codeArea.value = unescapeHtml(message.code);
-                                currentPrefix = unescapeHtml(message.prefix);
-                                currentSuffix = unescapeHtml(message.suffix);
-                                currentDeclEndMarker = unescapeHtml(message.declarationBlockEndMarker);
-                                break;
-                        }
-                    });
-                </script>
-            </body>
-            </html>`;
+        window.addEventListener('message', event => {
+            const msg = event.data;
+            if (msg.type === 'init') {
+                document.getElementById('declarations-area').value = msg.declarations;
+                document.getElementById('code-area').value = msg.code;
+            }
+        });
+    </script>
+</body>
+</html>`;
     }
 }
 
-function getNonce() {
+/**
+ * 產生 Webview 用的 nonce
+ */
+function getNonce(): string {
     let text = '';
     const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     for (let i = 0; i < 32; i++) {
@@ -334,12 +281,17 @@ function getNonce() {
     return text;
 }
 
+/**
+ * 將字串 escape 成 HTML 安全格式，放進 <textarea> 裡面才不會被解析
+ */
 function escapeHtml(unsafe: string): string {
-    if (typeof unsafe !== 'string') return unsafe;
+    if (typeof unsafe !== 'string') {
+        return unsafe;
+    }
     return unsafe
-         .replace(/&/g, "&amp;")
-         .replace(/</g, "&lt;")
-         .replace(/>/g, "&gt;")
-         .replace(/"/g, "&quot;")
-         .replace(/'/g, "&#039;");
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 }
